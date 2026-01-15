@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>飞书-滴滴入职中心</title>
+  <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css">
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://unpkg.com/element-plus"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f7fa; }
+    .app-container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 24px; border-radius: 12px; margin-bottom: 20px; }
+    .header h1 { font-size: 24px; font-weight: 600; }
+    .header p { opacity: 0.9; margin-top: 4px; }
+    .main-card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    .filters-row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 20px; }
+    .filter-item { flex: 1; min-width: 180px; }
+    .filter-item label { display: block; font-size: 13px; color: #606266; margin-bottom: 6px; font-weight: 500; }
+    .table-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #ebeef5; }
+    .toolbar-left { display: flex; align-items: center; gap: 16px; }
+    .toolbar-right { display: flex; gap: 12px; }
+    .stats { display: flex; gap: 16px; }
+    .stat-item { background: #f4f4f5; padding: 6px 12px; border-radius: 6px; font-size: 13px; }
+    .stat-item strong { color: #409eff; }
+    .user-info { display: flex; flex-direction: column; gap: 2px; }
+    .user-name { font-weight: 600; color: #303133; }
+    .user-meta { font-size: 12px; color: #909399; }
+    .editable-input { width: 100%; }
+    .action-btn { padding: 4px 8px; }
+    .log-console { background: #1e1e1e; border-radius: 12px; padding: 16px; margin-top: 20px; height: 200px; overflow-y: auto; font-family: 'Monaco', 'Menlo', monospace; font-size: 12px; }
+    .log-console-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .log-console-header h3 { color: #4ade80; font-size: 14px; }
+    .log-entry { padding: 3px 0; }
+    .log-time { color: #6b7280; margin-right: 8px; }
+    .log-level { padding: 1px 5px; border-radius: 3px; font-size: 10px; text-transform: uppercase; margin-right: 8px; }
+    .log-level.info { background: #3b82f6; color: white; }
+    .log-level.success { background: #22c55e; color: white; }
+    .log-level.warn { background: #f59e0b; color: white; }
+    .log-level.error { background: #ef4444; color: white; }
+    .log-message { color: #e5e7eb; }
+    .el-table .cell { padding: 8px 12px; }
+    .tab-desc { font-size: 13px; color: #909399; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div class="app-container">
+      <!-- Header -->
+      <div class="header">
+        <h1>🚀 飞书-滴滴入职中心</h1>
+        <p>自动化工作邮件和企业滴滴账号配置</p>
+      </div>
+
+      <!-- Main Content -->
+      <div class="main-card">
+        <el-tabs v-model="activeTab" @tab-change="handleTabChange">
+          <!-- Tab 1: 开通邮箱 -->
+          <el-tab-pane label="📧 开通邮箱" name="email">
+            <p class="tab-desc">为待入职员工（preboarding）配置工作邮箱</p>
+            
+            <!-- Filters -->
+            <div class="filters-row">
+              <div class="filter-item">
+                <label>城市</label>
+                <el-select v-model="emailFilters.city" placeholder="全部城市" clearable style="width: 100%">
+                  <el-option v-for="city in emailCities" :key="city" :label="city" :value="city" />
+                </el-select>
+              </div>
+              <div class="filter-item">
+                <label>入职日期</label>
+                <el-date-picker v-model="emailFilters.date" type="date" placeholder="选择日期" 
+                  value-format="YYYY-MM-DD" style="width: 100%" clearable />
+              </div>
+              <div class="filter-item" style="flex: 0;">
+                <label>&nbsp;</label>
+                <el-button type="primary" @click="fetchEmailHires" :loading="emailLoading">
+                  刷新
+                </el-button>
+              </div>
+            </div>
+
+            <!-- Toolbar -->
+            <div class="table-toolbar">
+              <div class="toolbar-left">
+                <el-checkbox v-model="emailSelectAll" @change="handleEmailSelectAll">全选</el-checkbox>
+                <div class="stats">
+                  <span class="stat-item">总计: <strong>{{ filteredEmailHires.length }}</strong></span>
+                  <span class="stat-item">已选: <strong>{{ selectedEmailUsers.length }}</strong></span>
+                </div>
+              </div>
+              <div class="toolbar-right">
+                <el-button type="success" @click="batchProvisionEmail" 
+                  :disabled="selectedEmailUsers.length === 0" :loading="emailProvisioning">
+                  一键开通邮箱 ({{ selectedEmailUsers.length }})
+                </el-button>
+              </div>
+            </div>
+
+            <!-- Table -->
+            <el-table :data="filteredEmailHires" v-loading="emailLoading" stripe row-key="id" style="width: 100%">
+              <el-table-column width="50">
+                <template #default="{ row }">
+                  <el-checkbox v-model="row.selected" />
+                </template>
+              </el-table-column>
+              
+              <el-table-column label="员工信息" min-width="200">
+                <template #default="{ row }">
+                  <div class="user-info">
+                    <span class="user-name">{{ row.name }}</span>
+                    <span class="user-meta">{{ row.city }} · 📅 {{ row.onboardingDate }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+
+              <el-table-column label="电话" width="140">
+                <template #default="{ row }">
+                  <el-input v-model="row.phone" size="small" />
+                </template>
+              </el-table-column>
+
+              <el-table-column label="邮箱" min-width="250">
+                <template #default="{ row }">
+                  <el-input v-model="row.suggested_email" size="small" />
+                </template>
+              </el-table-column>
+
+              <el-table-column label="操作" width="100" fixed="right">
+                <template #default="{ row }">
+                  <el-button type="primary" size="small" @click="provisionSingleEmail(row)" 
+                    :loading="row.provisioning">
+                    开通
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-tab-pane>
+
+          <!-- Tab 2: 开通滴滴 -->
+          <el-tab-pane label="🚗 开通滴滴" name="didi">
+            <p class="tab-desc">为已入职员工（completed）开通企业滴滴账号</p>
+            
+            <!-- Filters -->
+            <div class="filters-row">
+              <div class="filter-item">
+                <label>城市</label>
+                <el-select v-model="didiFilters.city" placeholder="全部城市" clearable style="width: 100%">
+                  <el-option v-for="city in didiCities" :key="city" :label="city" :value="city" />
+                </el-select>
+              </div>
+              <div class="filter-item">
+                <label>入职日期</label>
+                <el-date-picker v-model="didiFilters.date" type="date" placeholder="选择日期" 
+                  value-format="YYYY-MM-DD" style="width: 100%" clearable />
+              </div>
+              <div class="filter-item" style="flex: 0;">
+                <label>&nbsp;</label>
+                <el-button type="primary" @click="fetchDidiHires" :loading="didiLoading">
+                  刷新
+                </el-button>
+              </div>
+            </div>
+
+            <!-- Toolbar -->
+            <div class="table-toolbar">
+              <div class="toolbar-left">
+                <el-checkbox v-model="didiSelectAll" @change="handleDidiSelectAll">全选</el-checkbox>
+                <div class="stats">
+                  <span class="stat-item">总计: <strong>{{ filteredDidiHires.length }}</strong></span>
+                  <span class="stat-item">已选: <strong>{{ selectedDidiUsers.length }}</strong></span>
+                </div>
+              </div>
+              <div class="toolbar-right">
+                <el-button type="success" @click="batchProvisionDidi" 
+                  :disabled="selectedDidiUsers.length === 0" :loading="didiProvisioning">
+                  一键开通滴滴 ({{ selectedDidiUsers.length }})
+                </el-button>
+              </div>
+            </div>
+
+            <!-- Table -->
+            <el-table :data="filteredDidiHires" v-loading="didiLoading" stripe row-key="id" style="width: 100%">
+              <el-table-column width="50">
+                <template #default="{ row }">
+                  <el-checkbox v-model="row.selected" />
+                </template>
+              </el-table-column>
+              
+              <el-table-column label="员工信息" min-width="200">
+                <template #default="{ row }">
+                  <div class="user-info">
+                    <span class="user-name">{{ row.name }}</span>
+                    <span class="user-meta">{{ row.city }} · 📅 {{ row.onboardingDate }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+
+              <el-table-column label="电话" width="140">
+                <template #default="{ row }">
+                  <el-input v-model="row.phone" size="small" />
+                </template>
+              </el-table-column>
+
+              <el-table-column label="滴滴规则" min-width="200">
+                <template #default="{ row }">
+                  <el-select v-model="row.suggested_didi_rule_id" size="small" style="width: 100%" 
+                    placeholder="选择规则" filterable>
+                    <el-option v-for="rule in didiRules" :key="rule.id" 
+                      :label="rule.name" :value="rule.id" />
+                  </el-select>
+                </template>
+              </el-table-column>
+
+              <el-table-column label="操作" width="100" fixed="right">
+                <template #default="{ row }">
+                  <el-button type="primary" size="small" @click="provisionSingleDidi(row)" 
+                    :loading="row.provisioning">
+                    开通
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-tab-pane>
+        </el-tabs>
+      </div>
+
+      <!-- Log Console -->
+      <div class="log-console">
+        <div class="log-console-header">
+          <h3>📟 实时日志</h3>
+          <el-button size="small" text @click="clearLogs" style="color: #6b7280;">清空</el-button>
+        </div>
+        <div v-for="(log, index) in logs" :key="index" class="log-entry">
+          <span class="log-time">{{ formatTime(log.timestamp) }}</span>
+          <span :class="['log-level', log.level]">{{ log.level }}</span>
+          <span class="log-message">{{ log.message }}</span>
+        </div>
+        <div v-if="logs.length === 0" style="color: #6b7280; text-align: center; padding: 40px;">
+          等待日志...
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const { createApp, ref, computed, onMounted, onUnmounted, watch } = Vue;
+    const { ElMessage, ElMessageBox } = ElementPlus;
+
+    createApp({
+      setup() {
+        const activeTab = ref('email');
+        const logs = ref([]);
+        let eventSource = null;
+
+        // Email Tab State
+        const emailLoading = ref(false);
+        const emailProvisioning = ref(false);
+        const emailHires = ref([]);
+        const emailFilters = ref({ city: '', date: '' });
+        const emailSelectAll = ref(false);
+
+        // Didi Tab State
+        const didiLoading = ref(false);
+        const didiProvisioning = ref(false);
+        const didiHires = ref([]);
+        const didiFilters = ref({ city: '', date: '' });
+        const didiSelectAll = ref(false);
+        const didiRules = ref([]);
+
+        // Computed
+        const emailCities = computed(() => {
+          const citySet = new Set(emailHires.value.map(h => h.city).filter(Boolean));
+          return Array.from(citySet).sort();
+        });
+
+        const filteredEmailHires = computed(() => {
+          return emailHires.value.filter(h => {
+            if (emailFilters.value.city && h.city !== emailFilters.value.city) return false;
+            if (emailFilters.value.date && h.onboardingDate !== emailFilters.value.date) return false;
+            return true;
+          });
+        });
+
+        const selectedEmailUsers = computed(() => {
+          return filteredEmailHires.value.filter(h => h.selected);
+        });
+
+        const didiCities = computed(() => {
+          const citySet = new Set(didiHires.value.map(h => h.city).filter(Boolean));
+          return Array.from(citySet).sort();
+        });
+
+        const filteredDidiHires = computed(() => {
+          return didiHires.value.filter(h => {
+            if (didiFilters.value.city && h.city !== didiFilters.value.city) return false;
+            if (didiFilters.value.date && h.onboardingDate !== didiFilters.value.date) return false;
+            return true;
+          });
+        });
+
+        const selectedDidiUsers = computed(() => {
+          return filteredDidiHires.value.filter(h => h.selected);
+        });
+
+        // Methods
+        const fetchEmailHires = async () => {
+          emailLoading.value = true;
+          try {
+            const res = await fetch('/api/hires?status=preboarding');
+            const data = await res.json();
+            if (data.success) {
+              emailHires.value = data.data.map(h => ({ ...h, selected: false, provisioning: false }));
+            } else {
+              ElMessage.error(data.error || '获取数据失败');
+            }
+          } catch (err) {
+            ElMessage.error('网络错误: ' + err.message);
+          } finally {
+            emailLoading.value = false;
+          }
+        };
+
+        const fetchDidiHires = async () => {
+          didiLoading.value = true;
+          try {
+            const res = await fetch('/api/hires?status=completed');
+            const data = await res.json();
+            if (data.success) {
+              didiHires.value = data.data.map(h => ({ ...h, selected: false, provisioning: false }));
+            } else {
+              ElMessage.error(data.error || '获取数据失败');
+            }
+          } catch (err) {
+            ElMessage.error('网络错误: ' + err.message);
+          } finally {
+            didiLoading.value = false;
+          }
+        };
+
+        const fetchDidiRules = async () => {
+          try {
+            const res = await fetch('/api/didi/rules');
+            const data = await res.json();
+            if (data.success) {
+              didiRules.value = data.data;
+            }
+          } catch (err) {
+            console.error('Failed to fetch Didi rules:', err);
+          }
+        };
+
+        const handleEmailSelectAll = (val) => {
+          filteredEmailHires.value.forEach(h => h.selected = val);
+        };
+
+        const handleDidiSelectAll = (val) => {
+          filteredDidiHires.value.forEach(h => h.selected = val);
+        };
+
+        const provisionSingleEmail = async (row) => {
+          row.provisioning = true;
+          try {
+            const res = await fetch('/api/provision/email', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: row.id, email: row.suggested_email })
+            });
+            const data = await res.json();
+            if (data.success) {
+              ElMessage.success(`${row.name} 邮箱开通成功`);
+            } else {
+              ElMessage.error(data.error || '开通失败');
+            }
+          } catch (err) {
+            ElMessage.error('网络错误: ' + err.message);
+          } finally {
+            row.provisioning = false;
+          }
+        };
+
+        const batchProvisionEmail = async () => {
+          const users = selectedEmailUsers.value;
+          if (users.length === 0) return;
+
+          try {
+            await ElMessageBox.confirm(`确定为 ${users.length} 名员工开通邮箱？`, '确认操作', {
+              confirmButtonText: '确定',
+              cancelButtonText: '取消',
+              type: 'warning'
+            });
+          } catch { return; }
+
+          emailProvisioning.value = true;
+          try {
+            const res = await fetch('/api/provision/email/batch', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                users: users.map(u => ({ id: u.id, email: u.suggested_email, name: u.name }))
+              })
+            });
+            const data = await res.json();
+            if (data.success) {
+              ElMessage.success(`成功开通 ${data.summary?.successful || 0} 个邮箱`);
+              users.forEach(u => u.selected = false);
+            } else {
+              ElMessage.error(data.error || '批量开通失败');
+            }
+          } catch (err) {
+            ElMessage.error('网络错误: ' + err.message);
+          } finally {
+            emailProvisioning.value = false;
+          }
+        };
+
+        const provisionSingleDidi = async (row) => {
+          if (!row.suggested_didi_rule_id) {
+            ElMessage.warning('请先选择滴滴规则');
+            return;
+          }
+          row.provisioning = true;
+          try {
+            const res = await fetch('/api/provision/didi', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                name: row.name,
+                phone: row.phone,
+                didi_rule_id: row.suggested_didi_rule_id
+              })
+            });
+            const data = await res.json();
+            if (data.success) {
+              ElMessage.success(`${row.name} 滴滴账号开通成功`);
+            } else {
+              ElMessage.error(data.error || '开通失败');
+            }
+          } catch (err) {
+            ElMessage.error('网络错误: ' + err.message);
+          } finally {
+            row.provisioning = false;
+          }
+        };
+
+        const batchProvisionDidi = async () => {
+          const users = selectedDidiUsers.value;
+          if (users.length === 0) return;
+
+          const noRule = users.filter(u => !u.suggested_didi_rule_id);
+          if (noRule.length > 0) {
+            ElMessage.warning(`${noRule.length} 名员工未选择滴滴规则`);
+            return;
+          }
+
+          try {
+            await ElMessageBox.confirm(`确定为 ${users.length} 名员工开通滴滴？`, '确认操作', {
+              confirmButtonText: '确定',
+              cancelButtonText: '取消',
+              type: 'warning'
+            });
+          } catch { return; }
+
+          didiProvisioning.value = true;
+          try {
+            const res = await fetch('/api/provision/didi/batch', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                users: users.map(u => ({
+                  name: u.name,
+                  phone: u.phone,
+                  didi_rule_id: u.suggested_didi_rule_id
+                }))
+              })
+            });
+            const data = await res.json();
+            if (data.success) {
+              ElMessage.success(`成功开通 ${data.summary?.successful || 0} 个滴滴账号`);
+              users.forEach(u => u.selected = false);
+            } else {
+              ElMessage.error(data.error || '批量开通失败');
+            }
+          } catch (err) {
+            ElMessage.error('网络错误: ' + err.message);
+          } finally {
+            didiProvisioning.value = false;
+          }
+        };
+
+        const handleTabChange = (tab) => {
+          if (tab === 'email' && emailHires.value.length === 0) {
+            fetchEmailHires();
+          } else if (tab === 'didi' && didiHires.value.length === 0) {
+            fetchDidiHires();
+            fetchDidiRules();
+          }
+        };
+
+        const connectSSE = () => {
+          eventSource = new EventSource('/api/logs/stream');
+          eventSource.onmessage = (event) => {
+            try {
+              const log = JSON.parse(event.data);
+              logs.value.push(log);
+              if (logs.value.length > 200) logs.value.shift();
+            } catch {}
+          };
+          eventSource.onerror = () => {
+            setTimeout(connectSSE, 3000);
+          };
+        };
+
+        const formatTime = (timestamp) => {
+          const d = new Date(timestamp);
+          return d.toLocaleTimeString('zh-CN', { hour12: false });
+        };
+
+        const clearLogs = () => {
+          logs.value = [];
+        };
+
+        // Watch for select all sync
+        watch(selectedEmailUsers, (val) => {
+          emailSelectAll.value = val.length === filteredEmailHires.value.length && val.length > 0;
+        });
+
+        watch(selectedDidiUsers, (val) => {
+          didiSelectAll.value = val.length === filteredDidiHires.value.length && val.length > 0;
+        });
+
+        onMounted(() => {
+          fetchEmailHires();
+          connectSSE();
+        });
+
+        onUnmounted(() => {
+          if (eventSource) eventSource.close();
+        });
+
+        return {
+          activeTab, logs,
+          emailLoading, emailProvisioning, emailHires, emailFilters, emailSelectAll,
+          didiLoading, didiProvisioning, didiHires, didiFilters, didiSelectAll, didiRules,
+          emailCities, filteredEmailHires, selectedEmailUsers,
+          didiCities, filteredDidiHires, selectedDidiUsers,
+          fetchEmailHires, fetchDidiHires, handleTabChange,
+          handleEmailSelectAll, handleDidiSelectAll,
+          provisionSingleEmail, batchProvisionEmail,
+          provisionSingleDidi, batchProvisionDidi,
+          formatTime, clearLogs
+        };
+      }
+    }).use(ElementPlus).mount('#app');
+  </script>
+</body>
+</html>
