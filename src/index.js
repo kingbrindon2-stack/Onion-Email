@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 
 import apiRoutes from './api/routes.js';
 import { logger } from './services/logger.js';
+import { botService } from './services/bot.js';
 
 // Load environment variables
 dotenv.config();
@@ -51,8 +52,25 @@ app.listen(PORT, () => {
 ║     API Base:      http://localhost:${PORT}/api              ║
 ║                                                           ║
 ║     MCP Server:    npm run mcp                            ║
+║     Bot Status:    ${botService.enabled ? 'Enabled ✅' : 'Disabled (set FEISHU_BOT_CHAT_ID)'}          ║
 ╚═══════════════════════════════════════════════════════════╝
   `);
+
+  // 启动飞书机器人定时检查
+  botService.start();
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  logger.info('SIGTERM received, shutting down...');
+  botService.stop();
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  logger.info('SIGINT received, shutting down...');
+  botService.stop();
+  process.exit(0);
 });
 
 export default app;

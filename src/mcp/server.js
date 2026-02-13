@@ -7,7 +7,16 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import dotenv from 'dotenv';
 
-import { toolDefinitions, listHires, provisionEmployee, getDidiRules } from './tools.js';
+import {
+  toolDefinitions,
+  listHires,
+  provisionEmail,
+  provisionEmailBatch,
+  provisionDidi,
+  getDidiRules,
+  sendBotNotification,
+  getAuditLog
+} from './tools.js';
 
 // Load environment variables
 dotenv.config();
@@ -15,7 +24,7 @@ dotenv.config();
 const server = new Server(
   {
     name: 'feishu-didi-onboarding',
-    version: '1.0.0'
+    version: '2.0.0'
   },
   {
     capabilities: {
@@ -26,9 +35,7 @@ const server = new Server(
 
 // Handle list tools request
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: toolDefinitions
-  };
+  return { tools: toolDefinitions };
 });
 
 // Handle tool calls
@@ -42,35 +49,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'list_hires':
         result = await listHires(args);
         break;
-      case 'provision_employee':
-        result = await provisionEmployee(args);
+      case 'provision_email':
+        result = await provisionEmail(args);
+        break;
+      case 'provision_email_batch':
+        result = await provisionEmailBatch(args);
+        break;
+      case 'provision_didi':
+        result = await provisionDidi(args);
         break;
       case 'get_didi_rules':
         result = await getDidiRules();
+        break;
+      case 'send_bot_notification':
+        result = await sendBotNotification(args);
+        break;
+      case 'get_audit_log':
+        result = await getAuditLog(args);
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
 
     return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(result, null, 2)
-        }
-      ]
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2)
+      }]
     };
   } catch (error) {
     return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            success: false,
-            error: error.message
-          }, null, 2)
-        }
-      ],
+      content: [{
+        type: 'text',
+        text: JSON.stringify({ success: false, error: error.message }, null, 2)
+      }],
       isError: true
     };
   }
@@ -80,7 +92,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('Feishu-Didi Onboarding MCP Server running on stdio');
+  console.error('Feishu-Didi Onboarding MCP Server v2.0 running on stdio');
 }
 
 main().catch((error) => {

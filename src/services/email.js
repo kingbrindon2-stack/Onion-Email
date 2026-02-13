@@ -1,11 +1,10 @@
 import { pinyin } from 'pinyin-pro';
 import { feishuService } from './feishu.js';
+import { logger } from './logger.js';
 
 const EMAIL_DOMAIN = '@guanghe.tv';
 
 // 有效的后缀数字序列：避开 2 和 4
-// 一位数：1, 3, 5, 6, 7, 8, 9
-// 两位数：11, 13, 15, 16, 17, 18, 19, 31, 33, 35...（十位和个位都不含 2 和 4）
 const VALID_DIGITS = [1, 3, 5, 6, 7, 8, 9];
 
 function generateValidSuffixes() {
@@ -25,7 +24,7 @@ const VALID_SUFFIXES = generateValidSuffixes();
 
 // 获取下一个有效后缀
 function getNextSuffix(currentSuffix) {
-  if (currentSuffix === null) {
+  if (currentSuffix === null || currentSuffix === undefined) {
     return VALID_SUFFIXES[0]; // 第一个后缀是 1
   }
   const currentIndex = VALID_SUFFIXES.indexOf(currentSuffix);
@@ -36,132 +35,118 @@ function getNextSuffix(currentSuffix) {
 }
 
 class EmailService {
+  /**
+   * 将中文名转为拼音（纯本地计算，无 API 调用）
+   */
   generatePinyin(chineseName) {
     if (!chineseName) return '';
-    
+
     // Convert Chinese name to pinyin without tones, lowercase
     const pinyinResult = pinyin(chineseName, {
       toneType: 'none',
       type: 'array'
     });
-    
+
     return pinyinResult.join('').toLowerCase();
   }
 
-  async generateUniqueEmail(chineseName) {
-    const basePinyin = this.generatePinyin(chineseName);
-    if (!basePinyin) return null;
+  /**
+   * 纯本地生成建议邮箱（不调 API，仅拼音转换 + 同批去重）
+   * 用于列表展示阶段，速度极快
+   */
+  batchGenerateEmailsLocal(users) {
+    // 用于同批次去重：记录已分配的邮箱
+    const usedEmails = new Set();
 
-    // 首先尝试不带数字的邮箱
-    let email = `${basePinyin}${EMAIL_DOMAIN}`;
-    const exists = await feishuService.checkEmailExists(email);
-    
-    if (!exists) {
-      return {
-        email,
-        hadDuplicate: false,
-        suffix: null
-      };
-    }
-
-    // 有重复，按规则添加数字后缀
-    for (const suffix of VALID_SUFFIXES) {
-      email = `${basePinyin}${suffix}${EMAIL_DOMAIN}`;
-      const suffixExists = await feishuService.checkEmailExists(email);
-      
-      if (!suffixExists) {
+    return users.map(user => {
+      const basePinyin = this.generatePinyin(user.name);
+      if (!basePinyin) {
         return {
-          email,
-          hadDuplicate: true,
-          suffix
-        };
-      }
-    }
-
-    throw new Error(`Could not generate unique email for ${chineseName}: all valid suffixes exhausted`);
-  }
-
-  async batchGenerateEmails(users) {
-    const results = [];
-    
-    for (const user of users) {
-      try {
-        const emailResult = await this.generateUniqueEmail(user.name);
-        results.push({
-          ...user,
-          suggested_email: emailResult?.email || null,
-          email_had_duplicate: emailResult?.hadDuplicate || false
-        });
-      } catch (error) {
-        results.push({
           ...user,
           suggested_email: null,
-          email_error: error.message
-        });
+          email_note: '无法生成拼音'
+        };
       }
-    }
 
-    return results;
+      // 先尝试不带后缀
+      let email = `${basePinyin}${EMAIL_DOMAIN}`;
+      let suffix = null;
+
+      // 同批去重：如果已经分配给了前面的人，递增后缀
+      if (usedEmails.has(email)) {
+        for (const s of VALID_SUFFIXES) {
+          const candidate = `${basePinyin}${s}${EMAIL_DOMAIN}`;
+          if (!usedEmails.has(candidate)) {
+            email = candidate;
+            suffix = s;
+            break;
+          }
+        }
+      }
+
+      usedEmails.add(email);
+
+      return {
+        ...user,
+        suggested_email: email,
+        email_suffix: suffix,
+        email_base_pinyin: basePinyin
+      };
+    });
   }
 
   /**
-   * 为用户开通邮箱，带自动重试逻辑
-   * 如果遇到邮箱重复（包括离职员工回收站中的），自动尝试下一个后缀
+   * 为用户开通邮箱，带完整的去重+自动重试逻辑
+   * 
+   * 流程：
+   * 1. 如果前端传了指定邮箱，先尝试用指定的
+   * 2. 通过飞书通讯录 API 检查在职员工占用
+   * 3. 尝试写入飞书，如果遇到离职员工占用（回收站），自动重试下一个后缀
+   * 
+   * @param {string} preHireId - 待入职人员 ID
+   * @param {string} chineseName - 中文姓名
+   * @param {string} [preferredEmail] - 前端指定的邮箱（可选）
    */
-  async provisionEmailWithRetry(preHireId, chineseName) {
+  async provisionEmailWithRetry(preHireId, chineseName, preferredEmail = null) {
     const basePinyin = this.generatePinyin(chineseName);
     if (!basePinyin) {
       throw new Error(`无法生成拼音: ${chineseName}`);
     }
 
-    // 先检查在职员工邮箱，确定起始后缀
-    let currentSuffix = null;
-    let email = `${basePinyin}${EMAIL_DOMAIN}`;
-    
-    // 先用 API 检查在职员工
-    const baseExists = await feishuService.checkEmailExists(email);
-    if (baseExists) {
-      currentSuffix = VALID_SUFFIXES[0];
-      email = `${basePinyin}${currentSuffix}${EMAIL_DOMAIN}`;
-      
-      // 继续检查带后缀的邮箱
-      while (await feishuService.checkEmailExists(email)) {
-        currentSuffix = getNextSuffix(currentSuffix);
-        if (currentSuffix === null) {
-          throw new Error(`所有后缀都已用尽: ${chineseName}`);
-        }
-        email = `${basePinyin}${currentSuffix}${EMAIL_DOMAIN}`;
+    // 构建候选邮箱列表
+    const candidates = this._buildCandidateList(basePinyin, preferredEmail);
+
+    // 第一阶段：通过通讯录 API 快速跳过在职员工已占用的邮箱
+    let startIndex = 0;
+    for (let i = 0; i < candidates.length; i++) {
+      const exists = await feishuService.checkEmailExists(candidates[i]);
+      if (!exists) {
+        startIndex = i;
+        break;
+      }
+      if (i === candidates.length - 1) {
+        throw new Error(`所有后缀都已被在职员工占用: ${chineseName}`);
       }
     }
 
-    // 尝试更新邮箱，如果遇到离职员工重复，自动重试下一个后缀
-    const maxRetries = VALID_SUFFIXES.length + 1;
-    let attempts = 0;
+    // 第二阶段：尝试写入飞书，处理离职员工回收站占用
+    for (let i = startIndex; i < candidates.length; i++) {
+      const email = candidates[i];
+      const attempt = i - startIndex + 1;
+      logger.info(`尝试开通邮箱 (第${attempt}次): ${email}`);
 
-    while (attempts < maxRetries) {
-      attempts++;
-      console.log(`尝试开通邮箱 (第${attempts}次): ${email}`);
-      
       const result = await feishuService.updateWorkEmail(preHireId, email);
-      
+
       if (result.success) {
         return {
           success: true,
           email,
-          suffix: currentSuffix,
-          attempts
+          attempts: attempt
         };
       }
 
       if (result.isDuplicate) {
-        console.log(`邮箱 ${email} 与离职员工重复，尝试下一个后缀...`);
-        currentSuffix = currentSuffix === null ? VALID_SUFFIXES[0] : getNextSuffix(currentSuffix);
-        
-        if (currentSuffix === null) {
-          throw new Error(`所有后缀都已用尽（离职员工占用）: ${chineseName}`);
-        }
-        
-        email = `${basePinyin}${currentSuffix}${EMAIL_DOMAIN}`;
+        logger.warn(`邮箱 ${email} 被占用（可能是离职员工），尝试下一个...`);
         continue;
       }
 
@@ -169,7 +154,36 @@ class EmailService {
       throw new Error(`开通邮箱失败: ${result.msg || '未知错误'}`);
     }
 
-    throw new Error(`超过最大重试次数: ${chineseName}`);
+    throw new Error(`所有候选邮箱都已用尽: ${chineseName}`);
+  }
+
+  /**
+   * 构建候选邮箱列表
+   * 如果有 preferredEmail，把它放在最前面
+   */
+  _buildCandidateList(basePinyin, preferredEmail) {
+    const candidates = [];
+
+    // 基础邮箱（不带后缀）
+    const baseEmail = `${basePinyin}${EMAIL_DOMAIN}`;
+
+    // 如果有指定邮箱且不同于基础邮箱，优先尝试
+    if (preferredEmail && preferredEmail !== baseEmail) {
+      candidates.push(preferredEmail);
+    }
+
+    // 基础邮箱
+    candidates.push(baseEmail);
+
+    // 所有后缀邮箱
+    for (const suffix of VALID_SUFFIXES) {
+      const email = `${basePinyin}${suffix}${EMAIL_DOMAIN}`;
+      if (!candidates.includes(email)) {
+        candidates.push(email);
+      }
+    }
+
+    return candidates;
   }
 }
 

@@ -2,8 +2,20 @@ import axios from 'axios';
 
 const FEISHU_BASE_URL = 'https://open.feishu.cn/open-apis';
 
-// Location cache
-let locationCache = null;
+// Location cache with TTL
+let locationCache = { data: null, expiresAt: 0 };
+const LOCATION_CACHE_TTL = 30 * 60 * 1000; // 30 分钟
+
+// 飞书人员类型枚举映射 (employee_type_id -> 可读名称)
+export const EMPLOYEE_TYPE_MAP = {
+  '7193602309958436385': '正式',
+  '7193602311107724832': '实习',
+  '7193602323535480324': '劳务',
+  '7193602529916372492': '外包',
+  '7193602238470964748': '顾问'
+};
+
+export const INTERN_TYPE_ID = '7193602311107724832';
 
 class FeishuService {
   constructor() {
@@ -40,7 +52,7 @@ class FeishuService {
     return this.tokenCache.token;
   }
 
-  async request(method, path, data = null, params = null) {
+  async request(method, path, data = null, params = null, retries = 2) {
     const token = await this.getTenantAccessToken();
     const config = {
       method,
@@ -48,25 +60,50 @@ class FeishuService {
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json'
-      }
+      },
+      timeout: 15000 // 15 秒超时
     };
 
     if (data) config.data = data;
     if (params) config.params = params;
 
-    try {
-      const response = await axios(config);
-      return response.data;
-    } catch (err) {
-      console.error('Request error:', err.response?.data?.msg || err.message);
-      console.error('Full error response:', JSON.stringify(err.response?.data, null, 2));
-      throw err;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const response = await axios(config);
+        return response.data;
+      } catch (err) {
+        const status = err.response?.status;
+        const code = err.response?.data?.code;
+
+        // 可重试的错误：429(限流)、500/502/503(服务器错误)、网络超时
+        const isRetryable = !status || status === 429 || status >= 500 || err.code === 'ECONNABORTED';
+
+        if (isRetryable && attempt < retries) {
+          const delay = Math.min(1000 * Math.pow(2, attempt), 5000); // 指数退避，最多5秒
+          console.warn(`Request failed (attempt ${attempt + 1}/${retries + 1}), retrying in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+
+          // 如果是 token 过期，刷新 token
+          if (code === 99991663 || code === 99991664) {
+            this.tokenCache = { token: null, expiresAt: 0 };
+            const newToken = await this.getTenantAccessToken();
+            config.headers['Authorization'] = `Bearer ${newToken}`;
+          }
+          continue;
+        }
+
+        console.error('Request error:', err.response?.data?.msg || err.message);
+        console.error('Full error response:', JSON.stringify(err.response?.data, null, 2));
+        throw err;
+      }
     }
   }
 
-  // Build location ID -> city name map
+  // Build location ID -> city name map (with TTL cache)
   async getLocationMap() {
-    if (locationCache) return locationCache;
+    if (locationCache.data && Date.now() < locationCache.expiresAt) {
+      return locationCache.data;
+    }
 
     const locationMap = {};
     let pageToken = '';
@@ -86,12 +123,11 @@ class FeishuService {
       pageToken = result.data?.page_token || '';
     } while (pageToken);
 
-    locationCache = locationMap;
+    locationCache = { data: locationMap, expiresAt: Date.now() + LOCATION_CACHE_TTL };
     return locationMap;
   }
 
   async fetchPreHires(status = 'preboarding') {
-    // 使用 search 接口按状态过滤
     const allIds = [];
     let pageToken = '';
     let pageCount = 0;
@@ -131,38 +167,65 @@ class FeishuService {
       return [];
     }
 
-    // 用 V2 API 批量查询详细信息
+    // 分批查询，每批 10 个，使用并发（最多 3 个并发请求，避免被限流）
     const enrichedItems = [];
+    const BATCH_SIZE = 10;
+    const CONCURRENCY = 3;
+    const batches = [];
     
-    // 分批查询，每批 10 个
-    for (let i = 0; i < preHireIds.length; i += 10) {
-      const batchIds = preHireIds.slice(i, i + 10);
-      const result = await this.request('POST', '/corehr/v2/pre_hires/query?page_size=10', {
-        fields: ['person_info', 'employment_info', 'onboarding_info', 'offer_info'],
-        pre_hire_ids: batchIds
+    for (let i = 0; i < preHireIds.length; i += BATCH_SIZE) {
+      batches.push(preHireIds.slice(i, i + BATCH_SIZE));
+    }
+
+    // 分组并发执行
+    for (let i = 0; i < batches.length; i += CONCURRENCY) {
+      const concurrentBatches = batches.slice(i, i + CONCURRENCY);
+      const results = await Promise.allSettled(
+        concurrentBatches.map(batchIds =>
+          this.request('POST', `/corehr/v2/pre_hires/query?page_size=${batchIds.length}`, {
+            fields: ['person_info', 'employment_info', 'onboarding_info', 'offer_info'],
+            pre_hire_ids: batchIds
+          })
+        )
+      );
+
+      results.forEach(result => {
+        if (result.status === 'fulfilled' && result.value.code === 0 && result.value.data?.items) {
+          enrichedItems.push(...result.value.data.items);
+        }
       });
-      
-      if (result.code === 0 && result.data?.items) {
-        enrichedItems.push(...result.data.items);
-      }
     }
 
     console.log(`Enriched ${enrichedItems.length} pre-hires`);
 
-    // 过滤出没有开通邮箱的待入职人员
-    // 检查 onboarding_task_list 里 "IT 填写工作邮箱" 任务的状态
-    const filteredItems = (status === 'preboarding' && !showAll)
-      ? enrichedItems.filter(hire => {
-          const taskList = hire.onboarding_info?.onboarding_task_list || [];
-          const emailTask = taskList.find(t => t.task_name === 'IT 填写工作邮箱');
-          // 如果没有这个任务，或者任务状态不是 completed，说明还没开通邮箱
-          const hasEmail = emailTask && emailTask.task_status === 'completed';
-          console.log(`Pre-hire ${hire.pre_hire_id}: emailTask=${emailTask?.task_status}, hasEmail=${hasEmail}`);
-          return !hasEmail;
-        })
-      : enrichedItems;
+    // 过滤条件
+    let filteredItems = enrichedItems;
 
-    console.log(`Filtered to ${filteredItems.length} pre-hires without email`);
+    // 1. 过滤掉过期的"僵尸"数据：只保留最近 90 天内入职的
+    const cutoffDays = status === 'completed' ? 180 : 90;
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - cutoffDays);
+    const cutoffStr = cutoffDate.toISOString().slice(0, 10); // YYYY-MM-DD
+
+    filteredItems = filteredItems.filter(hire => {
+      const onboardingDate = hire.onboarding_info?.onboarding_date;
+      if (!onboardingDate) return true; // 没有日期的保留（以防万一）
+      return onboardingDate >= cutoffStr;
+    });
+
+    console.log(`After date filter (>= ${cutoffStr}): ${filteredItems.length} pre-hires`);
+
+    // 2. preboarding 状态下，过滤掉已开通邮箱的
+    if (status === 'preboarding' && !showAll) {
+      filteredItems = filteredItems.filter(hire => {
+        const taskList = hire.onboarding_info?.onboarding_task_list || [];
+        const emailTask = taskList.find(t => t.task_name === 'IT 填写工作邮箱');
+        const hasEmail = emailTask && emailTask.task_status === 'completed';
+        return !hasEmail;
+      });
+    }
+
+    console.log(`Filtered to ${filteredItems.length} pre-hires after all filters`);
 
     return filteredItems.map(hire => {
       const person = hire.person_info || {};
@@ -174,6 +237,7 @@ class FeishuService {
       const phone = (person.phone_number || '').replace(/^\+86/, '');
       const locationId = employment.work_location_id;
       const departmentId = employment.department_id;
+      const employeeTypeId = employment.employee_type_id || '';
       const onboardingDate = onboarding.onboarding_date;
       const onboardingStatus = onboarding.onboarding_status;
       const workEmail = offer.work_emails?.[0]?.email || '';
@@ -184,6 +248,8 @@ class FeishuService {
       const emailTaskStatus = emailTask?.task_status || 'unknown';
 
       const cityName = locationMap[locationId] || 'Unknown';
+      const employeeType = EMPLOYEE_TYPE_MAP[employeeTypeId] || '未知';
+      const isIntern = employeeTypeId === INTERN_TYPE_ID;
 
       return {
         id: hire.pre_hire_id,
@@ -192,6 +258,9 @@ class FeishuService {
         city: cityName,
         cityId: locationId,
         departmentId,
+        employeeTypeId,
+        employeeType,
+        isIntern,
         onboardingDate,
         onboardingStatus,
         workEmail,
@@ -248,6 +317,43 @@ class FeishuService {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * 发送飞书机器人消息（用于通知 IT）
+   * @param {string} webhookUrl - 飞书机器人 Webhook 地址
+   * @param {object} msgBody - 消息体
+   */
+  async sendBotMessage(webhookUrl, msgBody) {
+    try {
+      const response = await axios.post(webhookUrl, msgBody, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 10000
+      });
+      return response.data;
+    } catch (err) {
+      console.error('Send bot message error:', err.message);
+      throw err;
+    }
+  }
+
+  /**
+   * 通过应用发送消息到指定聊天
+   * @param {string} chatId - 群聊 ID
+   * @param {string} msgType - 消息类型
+   * @param {object} content - 消息内容
+   */
+  async sendMessageToChat(chatId, msgType, content) {
+    const result = await this.request('POST', '/im/v1/messages', {
+      receive_id: chatId,
+      msg_type: msgType,
+      content: typeof content === 'string' ? content : JSON.stringify(content)
+    }, { receive_id_type: 'chat_id' });
+
+    if (result.code !== 0) {
+      throw new Error(`Failed to send message: ${result.msg}`);
+    }
+    return result;
   }
 }
 
